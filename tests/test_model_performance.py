@@ -15,6 +15,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from evaluate_model import evaluate_holdout
+from export_backend import FireRiskPredictor, export_precomputed_forecast_parquet
 from ingest_nasapower import NASA_SCHEMA
 from train_predictive_risk import (
     population_weights,
@@ -202,6 +203,28 @@ class ProbabilityCorrectionTests(unittest.TestCase):
             self.assertAlmostEqual(
                 meta["probability"]["logit_offset"], math.log(0.2), places=9
             )
+
+            # Verify FastAPI bundle export & precomputed Parquet export
+            predictor = FireRiskPredictor.from_model_dir(tmp_path / "models")
+            bundle_path = predictor.save_bundle(tmp_path / "models" / "fire_risk_bundle.joblib")
+            reloaded = FireRiskPredictor.from_bundle(bundle_path)
+            sample = {col: 1.0 for col in reloaded.feature_columns}
+            out_one = reloaded.predict_one(sample)
+            self.assertEqual(out_one["modelo_version"], "lgbm-risk-24h-v2")
+            self.assertIn(out_one["categoria_riesgo"], ("Bajo", "Moderado", "Alto", "Extremo"))
+            self.assertGreaterEqual(out_one["probabilidad_riesgo"], 0.0)
+            self.assertLessEqual(out_one["probabilidad_riesgo"], 1.0)
+
+            pq_out = tmp_path / "models" / "riesgo_celda_7d.parquet"
+            info = export_precomputed_forecast_parquet(
+                predictor=reloaded,
+                firms_parquet=firms_path,
+                weather_glob=(weather_dir / "*.parquet").as_posix(),
+                output_parquet=pq_out,
+                horizon_days=3,
+            )
+            self.assertTrue(pq_out.exists())
+            self.assertEqual(info["rows"], 9)  # 3 active cells x 3 days
 
 
 if __name__ == "__main__":
