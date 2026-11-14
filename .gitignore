@@ -1,0 +1,21 @@
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# Python cache & test artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+
+# OS / Editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Legacy unused Open-Meteo sample
+data/weather/openmeteo_argentina.parquet
