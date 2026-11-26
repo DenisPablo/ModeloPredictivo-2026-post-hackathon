@@ -25,7 +25,7 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from train_predictive_risk import (
+from modelo_predictivo.train_predictive_risk import (
     FEATURE_COLUMNS,
     categorize_risk,
     to_real_probability,
@@ -145,10 +145,36 @@ def export_precomputed_forecast_parquet(
             ANY_VALUE(lat_centro)::FLOAT AS lat_centro,
             ANY_VALUE(lon_centro)::FLOAT AS lon_centro,
             (ROUND(ANY_VALUE(lat_centro) * 2.0) / 2.0)::FLOAT AS lat_clima,
-            (ROUND(ANY_VALUE(lon_centro) / 0.625) * 0.625)::FLOAT AS lon_clima
+            (ROUND(ANY_VALUE(lon_centro) / 0.625) * 0.625)::FLOAT AS lon_clima,
+            FLOOR(ANY_VALUE(lat_centro) / 0.12)::INT AS lat_bin,
+            FLOOR(ANY_VALUE(lon_centro) / 0.14)::INT AS lon_bin
         FROM read_parquet('{firms_parquet.as_posix()}')
         WHERE lat_centro IS NOT NULL AND lon_centro IS NOT NULL
         GROUP BY cell_id
+    ),
+    cell_neighbors AS (
+        SELECT a.cell_id AS dst_id, b.cell_id AS src_id
+        FROM active_cells a
+        JOIN active_cells b
+          ON b.lat_bin BETWEEN a.lat_bin - 1 AND a.lat_bin + 1
+         AND b.lon_bin BETWEEN a.lon_bin - 1 AND a.lon_bin + 1
+         AND a.cell_id != b.cell_id
+        WHERE (
+            6371.0 * 2.0 * ASIN(SQRT(
+                POWER(SIN(RADIANS(b.lat_centro - a.lat_centro) / 2.0), 2)
+                + COS(RADIANS(a.lat_centro)) * COS(RADIANS(b.lat_centro))
+                  * POWER(SIN(RADIANS(b.lon_centro - a.lon_centro) / 2.0), 2)
+            ))
+        ) <= 12.0
+    ),
+    neighbor_fires_at_start AS (
+        SELECT
+            cn.dst_id AS cell_id,
+            SUM(p.n_harm)::FLOAT AS focos_vecinos_1d
+        FROM pos_events p
+        JOIN cell_neighbors cn ON cn.src_id = p.cell_id
+        WHERE p.fecha = {start_date_sql} - INTERVAL 1 DAY
+        GROUP BY cn.dst_id
     ),
     cell_month_clim AS (
         SELECT
@@ -165,22 +191,46 @@ def export_precomputed_forecast_parquet(
             lon_clima::FLOAT AS lon_clima,
             elevacion_m::FLOAT AS elevacion_m,
             fecha,
-            temperature_2m_max::FLOAT AS temperature_2m_max,
-            relative_humidity_2m::FLOAT AS relative_humidity_2m,
-            wind_speed_10m_max::FLOAT AS wind_speed_10m_max,
-            precipitation_sum::FLOAT AS precipitation_sum,
-            shortwave_radiation_sum::FLOAT AS shortwave_radiation_sum,
+            COALESCE(temperature_2m_max, 22.0)::FLOAT AS temperature_2m_max,
+            LEAST(GREATEST(COALESCE(relative_humidity_2m, 55.0), 0.0), 100.0)::FLOAT AS relative_humidity_2m,
+            GREATEST(COALESCE(wind_speed_10m_max, 12.0), 0.0)::FLOAT AS wind_speed_10m_max,
+            GREATEST(COALESCE(precipitation_sum, 0.0), 0.0)::FLOAT AS precipitation_sum,
+            GREATEST(COALESCE(shortwave_radiation_sum, 15.0), 0.0)::FLOAT AS shortwave_radiation_sum,
             CASE WHEN COALESCE(precipitation_sum, 0.0) >= 1.0 THEN 1 ELSE 0 END AS is_rain_day
         FROM read_parquet('{weather_glob}')
         WHERE fecha BETWEEN {start_date_sql} - INTERVAL 60 DAY AND {end_date_sql}
     ),
-    weather_streaks AS (
+    weather_vpd AS (
         SELECT
             *,
             SUM(is_rain_day) OVER (
                 PARTITION BY lat_clima, lon_clima ORDER BY fecha
-            ) AS rain_group
+            ) AS rain_group,
+            (0.6108 * EXP((17.27 * temperature_2m_max) / (temperature_2m_max + 237.3)))::FLOAT AS es_kpa,
+            (
+                0.6108 * EXP((17.27 * temperature_2m_max) / (temperature_2m_max + 237.3))
+                * (1.0 - relative_humidity_2m / 100.0)
+            )::FLOAT AS vpd_approx
         FROM weather_base
+    ),
+    weather_et0 AS (
+        SELECT
+            *,
+            GREATEST(
+                0.0,
+                (
+                    ((4098.0 * es_kpa / POWER(temperature_2m_max + 237.3, 2)) * (0.408 * 0.70 * shortwave_radiation_sum))
+                    + (
+                        0.067 * (900.0 / (temperature_2m_max + 273.0))
+                        * (wind_speed_10m_max * (1000.0 / 3600.0) * 0.748)
+                        * vpd_approx
+                    )
+                ) / (
+                    (4098.0 * es_kpa / POWER(temperature_2m_max + 237.3, 2))
+                    + 0.067 * (1.0 + 0.34 * (wind_speed_10m_max * (1000.0 / 3600.0) * 0.748))
+                )
+            )::FLOAT AS et0_approx
+        FROM weather_vpd
     ),
     weather_features AS (
         SELECT
@@ -193,15 +243,15 @@ def export_precomputed_forecast_parquet(
             wind_speed_10m_max,
             precipitation_sum,
             shortwave_radiation_sum,
-            SUM(COALESCE(precipitation_sum, 0.0)) OVER (
+            SUM(precipitation_sum) OVER (
                 PARTITION BY lat_clima, lon_clima ORDER BY fecha
                 ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
             )::FLOAT AS lluvia_acum_7d,
-            SUM(COALESCE(precipitation_sum, 0.0)) OVER (
+            SUM(precipitation_sum) OVER (
                 PARTITION BY lat_clima, lon_clima ORDER BY fecha
                 ROWS BETWEEN 14 PRECEDING AND CURRENT ROW
             )::FLOAT AS lluvia_acum_15d,
-            SUM(COALESCE(precipitation_sum, 0.0)) OVER (
+            SUM(precipitation_sum) OVER (
                 PARTITION BY lat_clima, lon_clima ORDER BY fecha
                 ROWS BETWEEN 29 PRECEDING AND CURRENT ROW
             )::FLOAT AS lluvia_acum_30d,
@@ -211,11 +261,21 @@ def export_precomputed_forecast_parquet(
                     PARTITION BY lat_clima, lon_clima, rain_group ORDER BY fecha
                 ) - 1)::FLOAT
             END AS dias_consecutivos_sin_lluvia,
-            (
-                0.6108 * EXP((17.27 * temperature_2m_max) / (temperature_2m_max + 237.3))
-                * (1.0 - LEAST(GREATEST(relative_humidity_2m, 0.0), 100.0) / 100.0)
-            )::FLOAT AS vpd_approx
-        FROM weather_streaks
+            vpd_approx,
+            et0_approx,
+            SUM(precipitation_sum - et0_approx) OVER (
+                PARTITION BY lat_clima, lon_clima ORDER BY fecha
+                ROWS BETWEEN 14 PRECEDING AND CURRENT ROW
+            )::FLOAT AS balance_hidrico_15d,
+            SUM(precipitation_sum - et0_approx) OVER (
+                PARTITION BY lat_clima, lon_clima ORDER BY fecha
+                ROWS BETWEEN 29 PRECEDING AND CURRENT ROW
+            )::FLOAT AS balance_hidrico_30d,
+            AVG(vpd_approx) OVER (
+                PARTITION BY lat_clima, lon_clima ORDER BY fecha
+                ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
+            )::FLOAT AS vpd_mean_7d
+        FROM weather_et0
     ),
     target_dates AS (
         SELECT DISTINCT fecha
@@ -225,6 +285,14 @@ def export_precomputed_forecast_parquet(
     cell_memory_at_start AS (
         SELECT
             c.cell_id,
+            COALESCE(SUM(CASE
+                WHEN p.fecha = {start_date_sql} - INTERVAL 1 DAY
+                THEN p.n_harm ELSE 0.0
+            END), 0.0)::FLOAT AS focos_ultimos_1d,
+            COALESCE(SUM(CASE
+                WHEN p.fecha BETWEEN {start_date_sql} - INTERVAL 2 DAY AND {start_date_sql} - INTERVAL 1 DAY
+                THEN p.n_harm ELSE 0.0
+            END), 0.0)::FLOAT AS focos_ultimos_2d,
             COALESCE(SUM(CASE
                 WHEN p.fecha BETWEEN {start_date_sql} - INTERVAL 7 DAY AND {start_date_sql} - INTERVAL 1 DAY
                 THEN p.n_harm ELSE 0.0
@@ -237,6 +305,14 @@ def export_precomputed_forecast_parquet(
                 WHEN p.fecha BETWEEN {start_date_sql} - INTERVAL 7 DAY AND {start_date_sql} - INTERVAL 1 DAY
                 THEN p.phi_harm ELSE 0.0
             END), 0.0)::FLOAT AS frp_ultimos_7d,
+            COALESCE(SUM(CASE
+                WHEN p.fecha BETWEEN {start_date_sql} - INTERVAL 30 DAY AND {start_date_sql} - INTERVAL 1 DAY
+                THEN p.phi_harm ELSE 0.0
+            END), 0.0)::FLOAT AS frp_ultimos_30d,
+            LEAST(31.0, COALESCE(
+                DATEDIFF('day', MAX(CASE WHEN p.fecha < {start_date_sql} THEN p.fecha END), {start_date_sql}),
+                31.0
+            ))::FLOAT AS dias_desde_foco_reciente,
             COALESCE(
                 DATEDIFF('day', MAX(CASE WHEN p.fecha < {start_date_sql} THEN p.fecha END), {start_date_sql}) / 365.25,
                 10.0
@@ -256,9 +332,15 @@ def export_precomputed_forecast_parquet(
         td.fecha,
         EXTRACT(MONTH FROM td.fecha)::FLOAT AS mes,
         EXTRACT(DOY FROM td.fecha)::FLOAT AS dia_anio,
+        cm.focos_ultimos_1d,
+        cm.focos_ultimos_2d,
         cm.focos_ultimos_7d,
         cm.focos_ultimos_30d,
         cm.frp_ultimos_7d,
+        cm.frp_ultimos_30d,
+        cm.dias_desde_foco_reciente,
+        (cm.focos_ultimos_1d / (cm.focos_ultimos_7d + 1.0))::FLOAT AS ratio_actividad_1d_7d,
+        COALESCE(nf.focos_vecinos_1d, 0.0)::FLOAT AS focos_vecinos_1d,
         COALESCE(cmc.mediana_historica_mes, 0.0)::FLOAT AS mediana_historica_mes,
         cm.anios_desde_ultimo_fuego,
         wf.elevacion_m,
@@ -271,7 +353,11 @@ def export_precomputed_forecast_parquet(
         wf.lluvia_acum_15d,
         wf.lluvia_acum_30d,
         wf.dias_consecutivos_sin_lluvia,
-        wf.vpd_approx
+        wf.vpd_approx,
+        wf.et0_approx,
+        wf.balance_hidrico_15d,
+        wf.balance_hidrico_30d,
+        wf.vpd_mean_7d
     FROM active_cells ac
     CROSS JOIN target_dates td
     JOIN cell_memory_at_start cm ON ac.cell_id = cm.cell_id
@@ -282,6 +368,8 @@ def export_precomputed_forecast_parquet(
     LEFT JOIN cell_month_clim cmc
       ON ac.cell_id = cmc.cell_id
      AND EXTRACT(MONTH FROM td.fecha)::SMALLINT = cmc.mes
+    LEFT JOIN neighbor_fires_at_start nf
+      ON ac.cell_id = nf.cell_id
     ORDER BY ac.cell_id, td.fecha
     """
     df_arrow = con.sql(query).to_arrow_table()
@@ -342,7 +430,7 @@ def main() -> None:
     parser.add_argument(
         "--firms",
         type=Path,
-        default=Path("firms_argentina_harmonized.parquet"),
+        default=Path("data/firms_argentina_harmonized.parquet"),
     )
     parser.add_argument(
         "--weather-glob",

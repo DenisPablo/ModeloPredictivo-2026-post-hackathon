@@ -10,7 +10,7 @@ from typing import Any
 
 import lightgbm as lgb
 
-from train_predictive_risk import (
+from modelo_predictivo.train_predictive_risk import (
     build_dataset_splits,
     evaluate_predictions,
     population_weights,
@@ -77,7 +77,7 @@ def main() -> None:
     parser.add_argument(
         "--firms",
         type=Path,
-        default=Path("firms_argentina_harmonized.parquet"),
+        default=Path("data/firms_argentina_harmonized.parquet"),
     )
     parser.add_argument(
         "--weather-glob",

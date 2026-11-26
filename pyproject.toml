@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "modelo-predictivo"
+version = "0.1.0"
+description = "24-hour per-cell LightGBM fire-risk predictive model for Argentina"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "duckdb>=2.0.0",
+    "lightgbm>=4.7.0",
+    "numpy>=2.5.0",
+    "pyarrow>=26.0.0",
+    "scikit-learn>=1.9.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.2.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

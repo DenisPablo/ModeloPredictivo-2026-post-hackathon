@@ -14,10 +14,10 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from evaluate_model import evaluate_holdout
-from export_backend import FireRiskPredictor, export_precomputed_forecast_parquet
-from ingest_nasapower import NASA_SCHEMA
-from train_predictive_risk import (
+from modelo_predictivo.evaluate_model import evaluate_holdout
+from modelo_predictivo.export_backend import FireRiskPredictor, export_precomputed_forecast_parquet
+from modelo_predictivo.ingest_nasapower import NASA_SCHEMA
+from modelo_predictivo.train_predictive_risk import (
     population_weights,
     prior_logit_offset,
     to_real_probability,
@@ -26,7 +26,7 @@ from train_predictive_risk import (
 )
 
 REAL_MODEL = Path("models/fire_risk_lgbm.txt")
-REAL_FIRMS = Path("firms_argentina_harmonized.parquet")
+REAL_FIRMS = Path("data/firms_argentina_harmonized.parquet")
 REAL_WEATHER_2026 = Path("data/weather/nasapower/nasapower_2026.parquet")
 
 
@@ -210,7 +210,7 @@ class ProbabilityCorrectionTests(unittest.TestCase):
             reloaded = FireRiskPredictor.from_bundle(bundle_path)
             sample = {col: 1.0 for col in reloaded.feature_columns}
             out_one = reloaded.predict_one(sample)
-            self.assertEqual(out_one["modelo_version"], "lgbm-risk-24h-v2")
+            self.assertEqual(out_one["modelo_version"], "lgbm-risk-24h-v4")
             self.assertIn(out_one["categoria_riesgo"], ("Bajo", "Moderado", "Alto", "Extremo"))
             self.assertGreaterEqual(out_one["probabilidad_riesgo"], 0.0)
             self.assertLessEqual(out_one["probabilidad_riesgo"], 1.0)

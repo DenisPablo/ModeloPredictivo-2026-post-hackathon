@@ -1,6 +1,6 @@
 {
-  "model_version": "lgbm-risk-24h-v2",
-  "trained_at": "2026-11-14T22:10:41.050848+00:00",
+  "model_version": "lgbm-risk-24h-v4",
+  "trained_at": "2026-11-26T23:41:45.018925+00:00",
   "horizon_hours": 24,
   "positive_label_rule": "n_harmonized >= 1 AND phi_harmonized >= 10.0",
   "split": {
@@ -14,7 +14,7 @@
     "train_neg": 1131640,
     "raw_neg_pos_ratio": 5.946610614818708,
     "scale_pos_weight": 1.0,
-    "best_iteration": 494
+    "best_iteration": 599
   },
   "probability": {
     "meaning": "Real-world probability of a positive fire label for the cell in the next 24h",
@@ -28,9 +28,15 @@
     "lon_centro",
     "mes",
     "dia_anio",
+    "focos_ultimos_1d",
+    "focos_ultimos_2d",
     "focos_ultimos_7d",
     "focos_ultimos_30d",
     "frp_ultimos_7d",
+    "frp_ultimos_30d",
+    "dias_desde_foco_reciente",
+    "ratio_actividad_1d_7d",
+    "focos_vecinos_1d",
     "mediana_historica_mes",
     "anios_desde_ultimo_fuego",
     "elevacion_m",
@@ -43,159 +49,173 @@
     "lluvia_acum_15d",
     "lluvia_acum_30d",
     "dias_consecutivos_sin_lluvia",
-    "vpd_approx"
+    "vpd_approx",
+    "et0_approx",
+    "balance_hidrico_15d",
+    "balance_hidrico_30d",
+    "vpd_mean_7d"
   ],
   "feature_importance_split": {
-    "lat_centro": 3292,
-    "lon_centro": 3267,
-    "mes": 392,
-    "dia_anio": 3272,
-    "focos_ultimos_7d": 93,
-    "focos_ultimos_30d": 342,
-    "frp_ultimos_7d": 176,
-    "mediana_historica_mes": 490,
-    "anios_desde_ultimo_fuego": 1705,
-    "elevacion_m": 2362,
-    "temperature_2m_max": 1761,
-    "relative_humidity_2m": 1856,
-    "wind_speed_10m_max": 1644,
-    "precipitation_sum": 1105,
-    "shortwave_radiation_sum": 593,
-    "lluvia_acum_7d": 1481,
-    "lluvia_acum_15d": 1536,
-    "lluvia_acum_30d": 2157,
-    "dias_consecutivos_sin_lluvia": 1214,
-    "vpd_approx": 1890
+    "lat_centro": 3056,
+    "lon_centro": 3083,
+    "mes": 324,
+    "dia_anio": 3067,
+    "focos_ultimos_1d": 130,
+    "focos_ultimos_2d": 94,
+    "focos_ultimos_7d": 104,
+    "focos_ultimos_30d": 283,
+    "frp_ultimos_7d": 202,
+    "frp_ultimos_30d": 280,
+    "dias_desde_foco_reciente": 277,
+    "ratio_actividad_1d_7d": 87,
+    "focos_vecinos_1d": 777,
+    "mediana_historica_mes": 583,
+    "anios_desde_ultimo_fuego": 1611,
+    "elevacion_m": 2380,
+    "temperature_2m_max": 1743,
+    "relative_humidity_2m": 1974,
+    "wind_speed_10m_max": 1749,
+    "precipitation_sum": 1208,
+    "shortwave_radiation_sum": 392,
+    "lluvia_acum_7d": 1513,
+    "lluvia_acum_15d": 1343,
+    "lluvia_acum_30d": 1775,
+    "dias_consecutivos_sin_lluvia": 1227,
+    "vpd_approx": 1611,
+    "et0_approx": 1616,
+    "balance_hidrico_15d": 1304,
+    "balance_hidrico_30d": 1498,
+    "vpd_mean_7d": 1847
   },
   "validation_metrics": {
     "n_samples": 421793,
     "positive_rate": 0.0009259306050840528,
-    "mean_predicted_probability": 0.0009326043112266053,
-    "calibration_ratio": 1.0072075662105873,
-    "roc_auc": 0.9284240327804281,
-    "pr_auc": 0.06911250633059182,
-    "brier_score": 0.0008897464712752753,
-    "log_loss": 0.005435363793386515,
+    "mean_predicted_probability": 0.0009466250601937972,
+    "calibration_ratio": 1.0223498985735175,
+    "roc_auc": 0.9332285544876366,
+    "pr_auc": 0.07740942908502757,
+    "brier_score": 0.0008857549429667599,
+    "log_loss": 0.005338387419634024,
     "top_k": {
       "top_0.1pct": {
-        "precision": 0.1366017489755397,
-        "recall": 0.14767874677445136,
-        "lift": 147.5291433564176
+        "precision": 0.14432401597261837,
+        "recall": 0.15599095704596835,
+        "lift": 155.8691495671181
       },
       "top_1pct": {
-        "precision": 0.03529396839358737,
-        "recall": 0.3811742138795643,
-        "lift": 38.11729323968453
+        "precision": 0.03769914685329471,
+        "recall": 0.4071612888493069,
+        "lift": 40.714872849323854
       },
       "top_5pct": {
-        "precision": 0.012364995728917343,
-        "recall": 0.6677171108218584,
-        "lift": 13.35412790226854
+        "precision": 0.012750879786601534,
+        "recall": 0.6885661437281633,
+        "lift": 13.770880578511662
       }
     },
     "categories": {
       "Extremo": {
-        "share_of_cell_days": 0.0010010140601011447,
-        "precision": 0.1366017489755397,
-        "recall": 0.14767874677445136,
-        "lift": 147.5291433564176,
-        "mean_predicted_probability": 0.13317411051876657
+        "share_of_cell_days": 0.001000781472659526,
+        "precision": 0.14432401597261837,
+        "recall": 0.15599095704596835,
+        "lift": 155.8691495671181,
+        "mean_predicted_probability": 0.14772692965488896
       },
       "Alto": {
-        "share_of_cell_days": 0.008999019559356326,
-        "precision": 0.024024906015037595,
-        "recall": 0.23349546710511293,
-        "lift": 25.94676737449098,
-        "mean_predicted_probability": 0.022238613057459194
+        "share_of_cell_days": 0.008999527022865312,
+        "precision": 0.02584205777869669,
+        "recall": 0.2511703318033386,
+        "lift": 27.90928136169647,
+        "mean_predicted_probability": 0.024062414013819942
       },
       "Moderado": {
-        "share_of_cell_days": 0.04000076880721611,
-        "precision": 0.006632843464259926,
-        "recall": 0.28654289694229407,
-        "lift": 7.163434741049325,
-        "mean_predicted_probability": 0.006367139743713706
+        "share_of_cell_days": 0.040001297415037974,
+        "precision": 0.006513822910494269,
+        "recall": 0.28140485487885636,
+        "lift": 7.034893192565945,
+        "mean_predicted_probability": 0.006496980245213784
       },
       "Bajo": {
-        "share_of_cell_days": 0.9499991975733264,
-        "precision": 0.0003238643752770603,
-        "recall": 0.33228288917814164,
-        "lift": 0.3497717577308734,
-        "mean_predicted_probability": 0.0003626097330473859
+        "share_of_cell_days": 0.9499983940894372,
+        "precision": 0.0003035438173112254,
+        "recall": 0.3114338562718367,
+        "lift": 0.3278256660321437,
+        "mean_predicted_probability": 0.0003393107859409622
       }
     },
-    "baseline_recency_pr_auc": 0.030696812057548446
+    "baseline_recency_pr_auc": 0.034537602298487284
   },
   "test_metrics": {
     "n_samples": 173598,
     "positive_rate": 0.0005991355457287161,
-    "mean_predicted_probability": 0.0006241300236218002,
-    "calibration_ratio": 1.0417175680382706,
-    "roc_auc": 0.9195952089207031,
-    "pr_auc": 0.07848340503134653,
-    "brier_score": 0.0005756594106004301,
-    "log_loss": 0.003809879610271023,
+    "mean_predicted_probability": 0.0006580174887742184,
+    "calibration_ratio": 1.0982781667108157,
+    "roc_auc": 0.9248782948183452,
+    "pr_auc": 0.09023298520750989,
+    "brier_score": 0.0005699840787580124,
+    "log_loss": 0.003738171414153607,
     "top_k": {
       "top_0.1pct": {
-        "precision": 0.1036546164878097,
-        "recall": 0.17319451330358618,
-        "lift": 173.00695514858285
+        "precision": 0.10996835443037975,
+        "recall": 0.18377127747479755,
+        "lift": 183.54503453242376
       },
       "top_1pct": {
-        "precision": 0.02190051967334818,
-        "recall": 0.36564204263758054,
-        "lift": 36.55353088208284
+        "precision": 0.023331189074174873,
+        "recall": 0.3896050239629813,
+        "lift": 38.94142025206939
       },
       "top_5pct": {
-        "precision": 0.007545574437918566,
-        "recall": 0.6297306230375145,
-        "lift": 12.594102439275307
+        "precision": 0.007795064940722655,
+        "recall": 0.6505536274995869,
+        "lift": 13.010519900370257
       }
     },
     "categories": {
       "Extremo": {
-        "share_of_cell_days": 0.000415166971284169,
-        "precision": 0.1652754590984975,
-        "recall": 0.11452652454139811,
-        "lift": 275.85654077238297,
-        "mean_predicted_probability": 0.1277513719308139
+        "share_of_cell_days": 0.00039843355412532696,
+        "precision": 0.19234592445328033,
+        "recall": 0.1279127416955875,
+        "lift": 321.0390800955299,
+        "mean_predicted_probability": 0.15707311781774994
       },
       "Alto": {
-        "share_of_cell_days": 0.004061715218825075,
-        "precision": 0.024901576002827785,
-        "recall": 0.16881507188894398,
-        "lift": 41.56250815087346,
-        "mean_predicted_probability": 0.020682219937387274
+        "share_of_cell_days": 0.004699169299704512,
+        "precision": 0.024167974799565946,
+        "recall": 0.18955544538092878,
+        "lift": 40.33807536852273,
+        "mean_predicted_probability": 0.02234482785969444
       },
       "Moderado": {
-        "share_of_cell_days": 0.03041991668738541,
-        "precision": 0.005419436736620257,
-        "recall": 0.2751611303916708,
-        "lift": 9.04542682412326,
-        "mean_predicted_probability": 0.006104735145878383
+        "share_of_cell_days": 0.03183161310834511,
+        "precision": 0.00520242001959656,
+        "recall": 0.27640059494298463,
+        "lift": 8.683210429901909,
+        "mean_predicted_probability": 0.0062718805929179045
       },
       "Bajo": {
-        "share_of_cell_days": 0.9651032011225054,
-        "precision": 0.0002740812686100053,
-        "recall": 0.4414972731779871,
-        "lift": 0.45746120483745617,
-        "mean_predicted_probability": 0.00031227857403685444
+        "share_of_cell_days": 0.9630707840378251,
+        "precision": 0.00025265811501624545,
+        "recall": 0.4061312179804991,
+        "lift": 0.4217044320228783,
+        "mean_predicted_probability": 0.0003019384321725682
       }
     },
-    "baseline_recency_pr_auc": 0.02516657529814112
+    "baseline_recency_pr_auc": 0.03612665343807018
   },
   "risk_categories": {
     "derived_on": "validation",
     "Extremo": {
       "top_fraction_of_cell_days": 0.001,
-      "min_probability": 0.057850664396194046
+      "min_probability": 0.06035769861490964
     },
     "Alto": {
       "top_fraction_of_cell_days": 0.01,
-      "min_probability": 0.012920176782054635
+      "min_probability": 0.013874838628251245
     },
     "Moderado": {
       "top_fraction_of_cell_days": 0.05,
-      "min_probability": 0.0035496501995956643
+      "min_probability": 0.003447049505621314
     },
     "Bajo": {
       "top_fraction_of_cell_days": 1.0,

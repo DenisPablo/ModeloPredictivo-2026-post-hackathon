@@ -13,8 +13,8 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from ingest_nasapower import ARGENTINA_TILES, NASA_SCHEMA
-from train_predictive_risk import (
+from modelo_predictivo.ingest_nasapower import ARGENTINA_TILES, NASA_SCHEMA
+from modelo_predictivo.train_predictive_risk import (
     FEATURE_COLUMNS,
     build_training_dataset,
     train_and_export,

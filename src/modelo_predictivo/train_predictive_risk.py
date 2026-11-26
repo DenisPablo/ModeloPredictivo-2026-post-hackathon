@@ -21,21 +21,21 @@ from typing import Any
 import duckdb
 import lightgbm as lgb
 import numpy as np
-from sklearn.metrics import (
-    average_precision_score,
-    brier_score_loss,
-    log_loss,
-    roc_auc_score,
-)
 
 FEATURE_COLUMNS = [
     "lat_centro",
     "lon_centro",
     "mes",
     "dia_anio",
+    "focos_ultimos_1d",
+    "focos_ultimos_2d",
     "focos_ultimos_7d",
     "focos_ultimos_30d",
     "frp_ultimos_7d",
+    "frp_ultimos_30d",
+    "dias_desde_foco_reciente",
+    "ratio_actividad_1d_7d",
+    "focos_vecinos_1d",
     "mediana_historica_mes",
     "anios_desde_ultimo_fuego",
     "elevacion_m",
@@ -49,6 +49,10 @@ FEATURE_COLUMNS = [
     "lluvia_acum_30d",
     "dias_consecutivos_sin_lluvia",
     "vpd_approx",
+    "et0_approx",
+    "balance_hidrico_15d",
+    "balance_hidrico_30d",
+    "vpd_mean_7d",
 ]
 
 
@@ -133,10 +137,37 @@ def build_dataset_splits(
             ANY_VALUE(lat_centro)::FLOAT AS lat_centro,
             ANY_VALUE(lon_centro)::FLOAT AS lon_centro,
             (ROUND(ANY_VALUE(lat_centro) * 2.0) / 2.0)::FLOAT AS lat_clima,
-            (ROUND(ANY_VALUE(lon_centro) / 0.625) * 0.625)::FLOAT AS lon_clima
+            (ROUND(ANY_VALUE(lon_centro) / 0.625) * 0.625)::FLOAT AS lon_clima,
+            FLOOR(ANY_VALUE(lat_centro) / 0.12)::INT AS lat_bin,
+            FLOOR(ANY_VALUE(lon_centro) / 0.14)::INT AS lon_bin
         FROM read_parquet('{firms_parquet.as_posix()}')
         WHERE lat_centro IS NOT NULL AND lon_centro IS NOT NULL
         GROUP BY cell_id;
+
+        CREATE TEMP TABLE cell_neighbors AS
+        SELECT a.cell_id AS dst_id, b.cell_id AS src_id
+        FROM active_cells a
+        JOIN active_cells b
+          ON b.lat_bin BETWEEN a.lat_bin - 1 AND a.lat_bin + 1
+         AND b.lon_bin BETWEEN a.lon_bin - 1 AND a.lon_bin + 1
+         AND a.cell_id != b.cell_id
+        WHERE (
+            6371.0 * 2.0 * ASIN(SQRT(
+                POWER(SIN(RADIANS(b.lat_centro - a.lat_centro) / 2.0), 2)
+                + COS(RADIANS(a.lat_centro)) * COS(RADIANS(b.lat_centro))
+                  * POWER(SIN(RADIANS(b.lon_centro - a.lon_centro) / 2.0), 2)
+            ))
+        ) <= 12.0;
+
+        CREATE TEMP TABLE neighbor_fires_1d AS
+        SELECT
+            cn.dst_id AS cell_id,
+            (p.fecha + INTERVAL 1 DAY)::DATE AS target_fecha,
+            SUM(p.n_harm)::FLOAT AS focos_vecinos_1d
+        FROM pos_events p
+        JOIN cell_neighbors cn ON cn.src_id = p.cell_id
+        WHERE p.fecha >= DATE '2017-12-30'
+        GROUP BY cn.dst_id, (p.fecha + INTERVAL 1 DAY)::DATE;
 
         CREATE TEMP TABLE weather_features AS
         WITH weather_base AS (
@@ -145,22 +176,46 @@ def build_dataset_splits(
                 lon_clima::FLOAT AS lon_clima,
                 elevacion_m::FLOAT AS elevacion_m,
                 fecha,
-                temperature_2m_max::FLOAT AS temperature_2m_max,
-                relative_humidity_2m::FLOAT AS relative_humidity_2m,
-                wind_speed_10m_max::FLOAT AS wind_speed_10m_max,
-                precipitation_sum::FLOAT AS precipitation_sum,
-                shortwave_radiation_sum::FLOAT AS shortwave_radiation_sum,
+                COALESCE(temperature_2m_max, 22.0)::FLOAT AS temperature_2m_max,
+                LEAST(GREATEST(COALESCE(relative_humidity_2m, 55.0), 0.0), 100.0)::FLOAT AS relative_humidity_2m,
+                GREATEST(COALESCE(wind_speed_10m_max, 12.0), 0.0)::FLOAT AS wind_speed_10m_max,
+                GREATEST(COALESCE(precipitation_sum, 0.0), 0.0)::FLOAT AS precipitation_sum,
+                GREATEST(COALESCE(shortwave_radiation_sum, 15.0), 0.0)::FLOAT AS shortwave_radiation_sum,
                 CASE WHEN COALESCE(precipitation_sum, 0.0) >= 1.0 THEN 1 ELSE 0 END AS is_rain_day
             FROM read_parquet('{weather_glob}')
             WHERE fecha BETWEEN DATE '2018-01-01' AND DATE '{data_end}'
         ),
-        weather_streaks AS (
+        weather_vpd AS (
             SELECT
                 *,
                 SUM(is_rain_day) OVER (
                     PARTITION BY lat_clima, lon_clima ORDER BY fecha
-                ) AS rain_group
+                ) AS rain_group,
+                (0.6108 * EXP((17.27 * temperature_2m_max) / (temperature_2m_max + 237.3)))::FLOAT AS es_kpa,
+                (
+                    0.6108 * EXP((17.27 * temperature_2m_max) / (temperature_2m_max + 237.3))
+                    * (1.0 - relative_humidity_2m / 100.0)
+                )::FLOAT AS vpd_approx
             FROM weather_base
+        ),
+        weather_et0 AS (
+            SELECT
+                *,
+                GREATEST(
+                    0.0,
+                    (
+                        ((4098.0 * es_kpa / POWER(temperature_2m_max + 237.3, 2)) * (0.408 * 0.70 * shortwave_radiation_sum))
+                        + (
+                            0.067 * (900.0 / (temperature_2m_max + 273.0))
+                            * (wind_speed_10m_max * (1000.0 / 3600.0) * 0.748)
+                            * vpd_approx
+                        )
+                    ) / (
+                        (4098.0 * es_kpa / POWER(temperature_2m_max + 237.3, 2))
+                        + 0.067 * (1.0 + 0.34 * (wind_speed_10m_max * (1000.0 / 3600.0) * 0.748))
+                    )
+                )::FLOAT AS et0_approx
+            FROM weather_vpd
         )
         SELECT
             lat_clima,
@@ -172,15 +227,15 @@ def build_dataset_splits(
             wind_speed_10m_max,
             precipitation_sum,
             shortwave_radiation_sum,
-            SUM(COALESCE(precipitation_sum, 0.0)) OVER (
+            SUM(precipitation_sum) OVER (
                 PARTITION BY lat_clima, lon_clima ORDER BY fecha
                 ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
             )::FLOAT AS lluvia_acum_7d,
-            SUM(COALESCE(precipitation_sum, 0.0)) OVER (
+            SUM(precipitation_sum) OVER (
                 PARTITION BY lat_clima, lon_clima ORDER BY fecha
                 ROWS BETWEEN 14 PRECEDING AND CURRENT ROW
             )::FLOAT AS lluvia_acum_15d,
-            SUM(COALESCE(precipitation_sum, 0.0)) OVER (
+            SUM(precipitation_sum) OVER (
                 PARTITION BY lat_clima, lon_clima ORDER BY fecha
                 ROWS BETWEEN 29 PRECEDING AND CURRENT ROW
             )::FLOAT AS lluvia_acum_30d,
@@ -190,11 +245,21 @@ def build_dataset_splits(
                     PARTITION BY lat_clima, lon_clima, rain_group ORDER BY fecha
                 ) - 1)::FLOAT
             END AS dias_consecutivos_sin_lluvia,
-            (
-                0.6108 * EXP((17.27 * temperature_2m_max) / (temperature_2m_max + 237.3))
-                * (1.0 - LEAST(GREATEST(relative_humidity_2m, 0.0), 100.0) / 100.0)
-            )::FLOAT AS vpd_approx
-        FROM weather_streaks;
+            vpd_approx,
+            et0_approx,
+            SUM(precipitation_sum - et0_approx) OVER (
+                PARTITION BY lat_clima, lon_clima ORDER BY fecha
+                ROWS BETWEEN 14 PRECEDING AND CURRENT ROW
+            )::FLOAT AS balance_hidrico_15d,
+            SUM(precipitation_sum - et0_approx) OVER (
+                PARTITION BY lat_clima, lon_clima ORDER BY fecha
+                ROWS BETWEEN 29 PRECEDING AND CURRENT ROW
+            )::FLOAT AS balance_hidrico_30d,
+            AVG(vpd_approx) OVER (
+                PARTITION BY lat_clima, lon_clima ORDER BY fecha
+                ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
+            )::FLOAT AS vpd_mean_7d
+        FROM weather_et0;
         """)
 
         years = [
@@ -268,6 +333,14 @@ def build_dataset_splits(
                     s.fecha,
                     s.target,
                     COALESCE(SUM(CASE
+                        WHEN p.fecha = s.fecha - INTERVAL 1 DAY
+                        THEN p.n_harm ELSE 0.0
+                    END), 0.0)::FLOAT AS focos_ultimos_1d,
+                    COALESCE(SUM(CASE
+                        WHEN p.fecha BETWEEN s.fecha - INTERVAL 2 DAY AND s.fecha - INTERVAL 1 DAY
+                        THEN p.n_harm ELSE 0.0
+                    END), 0.0)::FLOAT AS focos_ultimos_2d,
+                    COALESCE(SUM(CASE
                         WHEN p.fecha BETWEEN s.fecha - INTERVAL 7 DAY AND s.fecha - INTERVAL 1 DAY
                         THEN p.n_harm ELSE 0.0
                     END), 0.0)::FLOAT AS focos_ultimos_7d,
@@ -279,6 +352,14 @@ def build_dataset_splits(
                         WHEN p.fecha BETWEEN s.fecha - INTERVAL 7 DAY AND s.fecha - INTERVAL 1 DAY
                         THEN p.phi_harm ELSE 0.0
                     END), 0.0)::FLOAT AS frp_ultimos_7d,
+                    COALESCE(SUM(CASE
+                        WHEN p.fecha BETWEEN s.fecha - INTERVAL 30 DAY AND s.fecha - INTERVAL 1 DAY
+                        THEN p.phi_harm ELSE 0.0
+                    END), 0.0)::FLOAT AS frp_ultimos_30d,
+                    LEAST(31.0, COALESCE(
+                        DATEDIFF('day', MAX(CASE WHEN p.fecha < s.fecha THEN p.fecha END), s.fecha),
+                        31.0
+                    ))::FLOAT AS dias_desde_foco_reciente,
                     COALESCE(
                         DATEDIFF('day', MAX(CASE WHEN p.fecha < s.fecha THEN p.fecha END), s.fecha) / 365.25,
                         10.0
@@ -296,9 +377,15 @@ def build_dataset_splits(
                 ac.lon_centro,
                 EXTRACT(MONTH FROM fm.fecha)::FLOAT AS mes,
                 EXTRACT(DOY FROM fm.fecha)::FLOAT AS dia_anio,
+                fm.focos_ultimos_1d,
+                fm.focos_ultimos_2d,
                 fm.focos_ultimos_7d,
                 fm.focos_ultimos_30d,
                 fm.frp_ultimos_7d,
+                fm.frp_ultimos_30d,
+                fm.dias_desde_foco_reciente,
+                (fm.focos_ultimos_1d / (fm.focos_ultimos_7d + 1.0))::FLOAT AS ratio_actividad_1d_7d,
+                COALESCE(nf.focos_vecinos_1d, 0.0)::FLOAT AS focos_vecinos_1d,
                 COALESCE(cmc.mediana_historica_mes, 0.0)::FLOAT AS mediana_historica_mes,
                 fm.anios_desde_ultimo_fuego,
                 wf.elevacion_m,
@@ -311,7 +398,11 @@ def build_dataset_splits(
                 wf.lluvia_acum_15d,
                 wf.lluvia_acum_30d,
                 wf.dias_consecutivos_sin_lluvia,
-                wf.vpd_approx
+                wf.vpd_approx,
+                wf.et0_approx,
+                wf.balance_hidrico_15d,
+                wf.balance_hidrico_30d,
+                wf.vpd_mean_7d
             FROM fire_memory fm
             JOIN active_cells ac ON fm.cell_id = ac.cell_id
             JOIN weather_features wf
@@ -321,6 +412,9 @@ def build_dataset_splits(
             LEFT JOIN cell_month_clim cmc
               ON fm.cell_id = cmc.cell_id
              AND EXTRACT(MONTH FROM fm.fecha)::SMALLINT = cmc.mes
+            LEFT JOIN neighbor_fires_1d nf
+              ON fm.cell_id = nf.cell_id
+             AND fm.fecha = nf.target_fecha
             """
             df_arrow = con.sql(batch_query).to_arrow_table()
             if df_arrow.num_rows > 0:
@@ -451,6 +545,30 @@ def categorize_risk(prob: np.ndarray, cutoffs: dict[str, float]) -> np.ndarray:
     return labels
 
 
+def _weighted_roc_pr_auc(
+    y_true: np.ndarray,
+    scores: np.ndarray,
+    weights: np.ndarray,
+) -> tuple[float, float, np.ndarray, np.ndarray, np.ndarray]:
+    pos = (y_true == 1).astype(np.float64)
+    w = np.asarray(weights, dtype=np.float64)
+    total_w = float(w.sum())
+    total_pos = float((pos * w).sum())
+    total_neg = total_w - total_pos
+    order = np.argsort(-scores, kind="mergesort")
+    w_ord = w[order]
+    pos_ord = pos[order]
+    cum_w = np.cumsum(w_ord)
+    cum_pos = np.cumsum(pos_ord * w_ord)
+    cum_neg = cum_w - cum_pos
+    tpr = np.concatenate(([0.0], cum_pos / max(total_pos, 1e-12)))
+    fpr = np.concatenate(([0.0], cum_neg / max(total_neg, 1e-12)))
+    roc_auc = float(np.trapezoid(tpr, fpr) if hasattr(np, "trapezoid") else np.trapz(tpr, fpr))
+    prec_curve = cum_pos / np.maximum(cum_w, 1e-12)
+    pr_auc = float(np.sum((pos_ord * w_ord / max(total_pos, 1e-12)) * prec_curve))
+    return roc_auc, pr_auc, order, cum_w, cum_pos
+
+
 def evaluate_predictions(
     y_true: np.ndarray,
     y_prob: np.ndarray,
@@ -465,21 +583,23 @@ def evaluate_predictions(
     base_rate = total_pos / total_w
     mean_pred = float(np.sum(y_prob * w) / total_w)
 
+    roc_auc, pr_auc, order, cum_w, cum_pos = _weighted_roc_pr_auc(y_true, y_prob, w)
+    brier = float(np.sum(w * (y_prob - pos) ** 2) / total_w)
+    p_clip = np.clip(y_prob, 1e-12, 1.0 - 1e-12)
+    ll = float(-np.sum(w * (pos * np.log(p_clip) + (1.0 - pos) * np.log(1.0 - p_clip))) / total_w)
+
     metrics: dict[str, Any] = {
         "n_samples": int(len(y_true)),
         "positive_rate": base_rate,
         "mean_predicted_probability": mean_pred,
         "calibration_ratio": mean_pred / max(base_rate, 1e-12),
-        "roc_auc": float(roc_auc_score(y_true, y_prob, sample_weight=w)),
-        "pr_auc": float(average_precision_score(y_true, y_prob, sample_weight=w)),
-        "brier_score": float(brier_score_loss(y_true, y_prob, sample_weight=w)),
-        "log_loss": float(log_loss(y_true, np.clip(y_prob, 1e-12, 1 - 1e-12), sample_weight=w)),
+        "roc_auc": roc_auc,
+        "pr_auc": pr_auc,
+        "brier_score": brier,
+        "log_loss": ll,
         "top_k": {},
     }
 
-    order = np.argsort(-y_prob)
-    cum_w = np.cumsum(w[order])
-    cum_pos = np.cumsum((pos * w)[order])
     for frac in TOP_K_FRACTIONS:
         k = min(int(np.searchsorted(cum_w, frac * total_w)), len(order) - 1)
         precision = float(cum_pos[k] / cum_w[k])
@@ -510,7 +630,8 @@ def evaluate_predictions(
 def recency_baseline_pr_auc(X: np.ndarray, y: np.ndarray, sample_weight: np.ndarray) -> float:
     """PR-AUC of the strongest single-feature baseline (recency of last fire)."""
     score = -X[:, FEATURE_COLUMNS.index("anios_desde_ultimo_fuego")]
-    return float(average_precision_score(y, score, sample_weight=sample_weight))
+    _, pr_auc, _, _, _ = _weighted_roc_pr_auc(y, score, sample_weight)
+    return pr_auc
 
 
 def train_and_export(
@@ -540,9 +661,9 @@ def train_and_export(
     raw_neg_pos_ratio = float(neg_count / max(pos_count, 1))
     scale_pos_weight = float(scale_pos_weight)
 
-    print("[3/3] Training LightGBM model...")
+    print("[3/3] Training LightGBM model (lgbm-risk-24h-v4)...")
     fit_start = time.perf_counter()
-    n_estimators = 500
+    n_estimators = 600
 
     def _progress_callback(env: lgb.callback.CallbackEnv) -> None:
         it = env.iteration + 1
@@ -552,24 +673,27 @@ def train_and_export(
             loss_str = f"val_logloss={loss_val:.4f}"
         render_progress(it, n_estimators, f"iter={it}", fit_start, loss_str)
 
-    clf = lgb.LGBMClassifier(
-        objective="binary",
-        n_estimators=n_estimators,
-        learning_rate=0.05,
-        num_leaves=63,
-        max_bin=255,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        scale_pos_weight=scale_pos_weight,
-        n_jobs=-1,
-        random_state=42,
-        verbose=-1,
-    )
-    clf.fit(
-        X_train,
-        y_train,
-        eval_set=[(X_val, y_val)],
-        eval_metric="binary_logloss",
+    dtrain = lgb.Dataset(X_train, label=y_train, feature_name=FEATURE_COLUMNS)
+    dval = lgb.Dataset(X_val, label=y_val, reference=dtrain, feature_name=FEATURE_COLUMNS)
+    params = {
+        "objective": "binary",
+        "metric": "binary_logloss",
+        "learning_rate": 0.05,
+        "num_leaves": 63,
+        "max_bin": 255,
+        "bagging_fraction": 0.8,
+        "bagging_freq": 1,
+        "feature_fraction": 0.8,
+        "scale_pos_weight": scale_pos_weight,
+        "num_threads": -1,
+        "seed": 42,
+        "verbose": -1,
+    }
+    booster = lgb.train(
+        params,
+        dtrain,
+        num_boost_round=n_estimators,
+        valid_sets=[dval],
         callbacks=[
             lgb.early_stopping(stopping_rounds=40, first_metric_only=True, verbose=False),
             _progress_callback,
@@ -581,7 +705,7 @@ def train_and_export(
     # Real-world probability: undo negative downsampling and class weighting.
     logit_offset = prior_logit_offset(neg_sample_permille, scale_pos_weight)
     w_val = population_weights(y_val, neg_sample_permille)
-    p_val = to_real_probability(clf.predict(X_val, raw_score=True), logit_offset)
+    p_val = to_real_probability(booster.predict(X_val, raw_score=True), logit_offset)
     # Category cutoffs are derived on validation only (2026 test stays untouched).
     risk_cutoffs = derive_risk_cutoffs(p_val, w_val)
 
@@ -590,7 +714,7 @@ def train_and_export(
     test_metrics = None
     if len(y_test) > 0:
         w_test = population_weights(y_test, neg_sample_permille)
-        p_test = to_real_probability(clf.predict(X_test, raw_score=True), logit_offset)
+        p_test = to_real_probability(booster.predict(X_test, raw_score=True), logit_offset)
         test_metrics = evaluate_predictions(y_test, p_test, w_test, risk_cutoffs)
         test_metrics["baseline_recency_pr_auc"] = recency_baseline_pr_auc(X_test, y_test, w_test)
 
@@ -598,14 +722,14 @@ def train_and_export(
     model_path = model_dir / "fire_risk_lgbm.txt"
     meta_path = model_dir / "fire_risk_metadata.json"
 
-    clf.booster_.save_model(str(model_path))
+    booster.save_model(str(model_path))
 
     importances = {
         col: int(imp)
-        for col, imp in zip(FEATURE_COLUMNS, clf.feature_importances_)
+        for col, imp in zip(FEATURE_COLUMNS, booster.feature_importance(importance_type="split"))
     }
     metadata = {
-        "model_version": "lgbm-risk-24h-v2",
+        "model_version": "lgbm-risk-24h-v4",
         "trained_at": datetime.now(timezone.utc).isoformat(),
         "horizon_hours": 24,
         "positive_label_rule": "n_harmonized >= 1 AND phi_harmonized >= 10.0",
@@ -620,7 +744,7 @@ def train_and_export(
             "train_neg": neg_count,
             "raw_neg_pos_ratio": raw_neg_pos_ratio,
             "scale_pos_weight": float(scale_pos_weight),
-            "best_iteration": int(clf.best_iteration_ or clf.n_estimators),
+            "best_iteration": int(booster.best_iteration or n_estimators),
         },
         "probability": {
             "meaning": "Real-world probability of a positive fire label for the cell in the next 24h",
@@ -655,7 +779,7 @@ def main() -> None:
     parser.add_argument(
         "--firms",
         type=Path,
-        default=Path("firms_argentina_harmonized.parquet"),
+        default=Path("data/firms_argentina_harmonized.parquet"),
     )
     parser.add_argument(
         "--weather-glob",
